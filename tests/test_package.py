@@ -38,6 +38,7 @@ class PackageTests(unittest.TestCase):
             '[project]\nname = "airplay-volume-bridge"\nversion = "0.1.0"\n',
         )
         self.write("README.md", "# Source package\n")
+        self.write("README.ru.md", "# Исходники\n")
         self.write("src/main.c", "int main(void) { return 0; }\n")
 
     def write(self, relative: str, content: str) -> Path:
@@ -61,6 +62,7 @@ class PackageTests(unittest.TestCase):
             [
                 ".github/workflows/check.yml",
                 "README.md",
+                "README.ru.md",
                 "pyproject.toml",
                 "src/main.c",
             ],

@@ -18,6 +18,7 @@ from pathlib import Path
 PROJECT = "airplay-volume-bridge"
 ROOTS = (
     "README.md",
+    "README.ru.md",
     "LICENSE",
     "NOTICE",
     "Makefile",
