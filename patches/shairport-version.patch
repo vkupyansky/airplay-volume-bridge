@@ -1,0 +1,11 @@
+--- a/common.c
++++ b/common.c
+@@ -1953,6 +1953,8 @@
+     else
+ #endif
+       strcpy(version_string, PACKAGE_VERSION);
++#include "bridge_version.h"
++    strcat(version_string, "-bridge-" BRIDGE_VERSION);
+ #ifdef CONFIG_AIRPLAY_2
+     strcat(version_string, "-AirPlay2");
+     char smiv[1024];

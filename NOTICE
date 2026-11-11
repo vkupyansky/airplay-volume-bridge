@@ -1,0 +1,16 @@
+AirPlay Volume Bridge includes original integration code and patches to:
+
+Shairport Sync 5.6.3
+https://github.com/mikebrady/shairport-sync
+Copyright Mike Brady and contributors. Main license: MIT.
+Additional component licenses are retained in the upstream LICENSES directory.
+The build downloads the unmodified release archive and verifies its SHA-256.
+
+The source distribution does not include Shairport Sync, Homebrew libraries,
+or their compiled binaries. Local builds link to separately installed FFmpeg,
+OpenSSL, libconfig and popt. Each dependency retains its own license.
+Redistributing compiled binaries requires reviewing the licenses of the actual
+linked dependencies, including the configuration of the FFmpeg build.
+
+AirPlay is a trademark of Apple Inc. This independent project is not affiliated
+with or endorsed by Apple Inc.

@@ -1,0 +1,215 @@
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -124,7 +124,7 @@
+ endif
+ 
+ if USE_COREAUDIO
+-shairport_sync_SOURCES += audio_coreaudio.c
++shairport_sync_SOURCES += audio_coreaudio.c system_volume.c system_volume.h volume_value.h
+ endif
+ 
+ if USE_AO
+--- a/player.c
++++ b/player.c
+@@ -113,6 +113,9 @@
+ #include "loudness.h"
+ 
+ #include "activity_monitor.h"
++#ifdef CONFIG_COREAUDIO
++#include "system_volume.h"
++#endif
+ 
+ const unsigned int silent_channel_index = 65;
+ const unsigned int front_mono_channel_index = 66;
+@@ -128,6 +131,7 @@
+ #define BUFIDX(seqno) ((seq_t)(seqno) % BUFFER_FRAMES)
+ 
+ void do_flush(uint32_t timestamp, rtsp_conn_info *conn);
++static int player_volume_initial(rtsp_conn_info *conn);
+ 
+ #ifdef CONFIG_FFMPEG
+ size_t avflush(rtsp_conn_info *conn);
+@@ -3396,10 +3400,11 @@
+ }
+ 
+ double suggested_volume(rtsp_conn_info *conn) {
+-  double response = config.airplay_volume;
+-  if ((conn != NULL) && (conn->own_airplay_volume_set != 0)) {
+-    response = conn->own_airplay_volume;
+-  }
++  if (conn == NULL)
++    return config.airplay_volume;
++  pthread_mutex_lock(&conn->volume_control_mutex);
++  double response = conn->own_airplay_volume_set ? conn->own_airplay_volume : config.airplay_volume;
++  pthread_mutex_unlock(&conn->volume_control_mutex);
+   return response;
+ }
+ 
+@@ -3823,9 +3828,8 @@
+   // if not already set, set the volume to the pending_airplay_volume, if any, or otherwise to the
+   // suggested volume.
+ 
+-  double initial_volume = suggested_volume(conn);
+-  debug(2, "Set initial volume to %.6f.", initial_volume);
+-  player_volume(initial_volume, conn); // will contain a cancellation point if asked to wait
++  // исходное значение выбирается под той же блокировкой, что и команды телефона
++  (void)player_volume_initial(conn);
+ 
+   debug(2, "Play begin");
+ 
+@@ -5212,8 +5216,28 @@
+ #endif
+ }
+ 
+-void player_volume_without_notification(double airplay_volume, rtsp_conn_info *conn) {
+-  pthread_mutex_lock(&conn->volume_control_mutex);
++static int player_volume_without_notification_locked(double airplay_volume, rtsp_conn_info *conn) {
++#ifdef CONFIG_COREAUDIO
++  if (strcmp(config.output->name, "coreaudio") == 0) {
++    VolumeValue request;
++    if (!volume_value_from_db(airplay_volume, &request)) {
++      warn("Invalid AirPlay volume rejected before CoreAudio.");
++      return 1;
++    }
++    SystemVolumeState actual;
++    if (system_volume_apply(&request, &actual) != 0) {
++      warn("CoreAudio volume change failed: %s", system_volume_error());
++      return 1;
++    }
++    config.airplay_volume = airplay_volume;
++    conn->own_airplay_volume = airplay_volume;
++    conn->fix_volume = 0x10000;
++    conn->software_mute_enabled = 0;
++    player_send_volume_metadata(0, airplay_volume, 0, 0, 0, 0);
++    debug(2, "CoreAudio volume %.3f, muted %d", actual.volume, (int)actual.muted);
++    return 0;
++  }
++#endif
+   // store the volume first: the metadata hub reads config.airplay_volume when it
+   // processes the 'pvol' message sent below, possibly before this function returns
+   config.airplay_volume = airplay_volume;
+@@ -5432,12 +5456,41 @@
+           "is disabled.",
+           volume_mode, airplay_volume, software_attenuation / 100.0, hardware_attenuation / 100.0);
+   }
++  return 0;
++}
++
++static int player_volume_serialized(double airplay_volume, rtsp_conn_info *conn, int initial) {
++  int previous_cancel_state;
++  if (pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &previous_cancel_state) != 0) {
++    warn("Unable to protect volume update from cancellation.");
++    return 1;
++  }
++  int lock_status = pthread_mutex_lock(&conn->volume_control_mutex);
++  if (lock_status != 0) {
++    pthread_setcancelstate(previous_cancel_state, NULL);
++    warn("Unable to lock volume update: %d", lock_status);
++    return 1;
++  }
++  if (initial)
++    airplay_volume = conn->own_airplay_volume_set ? conn->own_airplay_volume : config.airplay_volume;
++#ifdef CONFIG_COREAUDIO
++  if (strcmp(config.output->name, "coreaudio") != 0)
++#endif
++    command_set_volume(airplay_volume);
++  int result = player_volume_without_notification_locked(airplay_volume, conn);
++  if (result == 0)
++    conn->own_airplay_volume_set = 1;
+   pthread_mutex_unlock(&conn->volume_control_mutex);
++  pthread_setcancelstate(previous_cancel_state, NULL);
++  return result;
+ }
+ 
+-void player_volume(double airplay_volume, rtsp_conn_info *conn) {
+-  command_set_volume(airplay_volume);
+-  player_volume_without_notification(airplay_volume, conn);
++static int player_volume_initial(rtsp_conn_info *conn) {
++  return player_volume_serialized(0, conn, 1);
++}
++
++int player_volume(double airplay_volume, rtsp_conn_info *conn) {
++  return player_volume_serialized(airplay_volume, conn, 0);
+ }
+ 
+ void do_flush(uint32_t timestamp, rtsp_conn_info *conn) {
+--- a/player.h
++++ b/player.h
+@@ -640,8 +640,7 @@
+ int player_play(rtsp_conn_info *conn);
+ int player_stop(rtsp_conn_info *conn);
+ 
+-void player_volume(double f, rtsp_conn_info *conn);
+-void player_volume_without_notification(double f, rtsp_conn_info *conn);
++int player_volume(double f, rtsp_conn_info *conn);
+ void player_flush(uint32_t timestamp, rtsp_conn_info *conn);
+ // void player_full_flush(rtsp_conn_info *conn);
+ 
+--- a/rtsp.c
++++ b/rtsp.c
+@@ -79,6 +79,7 @@
+ #include "bonjour_strings.h"
+ #include "common.h"
+ #include "player.h"
++#include "volume_value.h"
+ #include "rtp.h"
+ #include "rtsp.h"
+ 
+@@ -3244,7 +3245,12 @@
+       cp_left = 0;
+ 
+     if (!strncmp(cp, "volume: ", strlen("volume: "))) {
+-      float volume = atof(cp + strlen("volume: "));
++      VolumeValue request;
++      if (!volume_value_parse(cp + strlen("volume: "), &request)) {
++        resp->respcode = 400;
++        return;
++      }
++      double volume = request.muted ? -144.0 : request.volume * 30.0 - 30.0;
+       debug(3, "Connection %d: request to set AirPlay Volume to: %f.", conn->connection_number,
+             volume);
+       // if we are playing, go ahead and change the volume
+@@ -3257,9 +3263,11 @@
+       pthread_cleanup_push(rwlock_unlock, (void *)&principal_conn_lock);
+       if (principal_conn == conn) {
+         debug(3, "Connection %d: set player volume to %.3f.", conn->connection_number, volume);
+-        player_volume(volume, conn);
+-        debug(3, "Connection %d: set player volume to %.3f success.", conn->connection_number,
+-              volume);
++        if (player_volume(volume, conn) != 0)
++          resp->respcode = 500;
++        else
++          debug(3, "Connection %d: set player volume to %.3f success.", conn->connection_number,
++                volume);
+       } else {
+         if (principal_conn != NULL)
+           debug(2, "Connection %d: fail to set player volume to %.3f. Principal conn is %d.",
+@@ -3268,9 +3276,11 @@
+           debug(2, "Connection %d: fail to set player volume to %.3f. Principal conn is NULL.",
+                 conn->connection_number, volume);
+       }
+-      if (conn != NULL) {
++      if (conn != NULL && principal_conn != conn) {
++        pthread_mutex_lock(&conn->volume_control_mutex);
+         conn->own_airplay_volume = volume;
+         conn->own_airplay_volume_set = 1;
++        pthread_mutex_unlock(&conn->volume_control_mutex);
+       }
+       pthread_cleanup_pop(1); // release the principal_conn lock
+                               // #ifdef CONFIG_DBUS_INTERFACE
+@@ -3354,6 +3354,7 @@
+ }
+ 
+ static void handle_set_parameter(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp) {
++  resp->respcode = 200;
+   debug(4, "Connection %d: SET_PARAMETER", conn->connection_number);
+   // if (!req->contentlength)
+   //    debug(1, "received empty SET_PARAMETER request.");
+@@ -3443,7 +3444,6 @@
+     debug(1, "Connection %d: missing Content-Type header in SET_PARAMETER request.",
+           conn->connection_number);
+   }
+-  resp->respcode = 200;
+ }
+ 
+ static void handle_announce(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp) {

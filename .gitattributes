@@ -1,0 +1,2 @@
+# пустая строка контекста unified diff содержит обязательный пробел
+patches/*.patch whitespace=-blank-at-eol

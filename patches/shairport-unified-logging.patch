@@ -1,0 +1,91 @@
+--- a/utilities/debug.c
++++ b/utilities/debug.c
+@@ -32,7 +32,38 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <syslog.h>
+-#include <unistd.h> // for usleep()
++#include <unistd.h> // for usleep()
++
++#ifdef CONFIG_COREAUDIO
++#include <os/log.h>
++
++static pthread_once_t receiver_log_once = PTHREAD_ONCE_INIT;
++static os_log_t receiver_log;
++
++static void create_receiver_log(void) {
++  receiver_log = os_log_create("local.airplay-volume-bridge", "receiver");
++}
++#endif
++
++static void write_receiver_log(int priority, const char *format, const char *message) {
++#ifdef CONFIG_COREAUDIO
++  pthread_once(&receiver_log_once, create_receiver_log);
++  os_log_type_t type = OS_LOG_TYPE_DEFAULT;
++  if (priority == LOG_ERR)
++    type = OS_LOG_TYPE_FAULT;
++  else if (priority == LOG_WARNING)
++    type = OS_LOG_TYPE_ERROR;
++  else if (priority == LOG_DEBUG)
++    type = OS_LOG_TYPE_DEBUG;
++  // значения аргументов могут содержать адреса, пути и метаданные отправителя
++  os_log_with_type(receiver_log, type, "%{public}s | %{private}s", format, message);
++#else
++  (void)priority;
++  (void)format;
++#endif
++  // launchd направляет stderr в /dev/null; ручной запуск сохраняет диагностику
++  fprintf(stderr, "%s\n", message);
++}
+ 
+ static int debuglev = 0;
+ int debugger_show_elapsed_time = 0;
+@@ -145,8 +176,7 @@
+   va_start(args, format);
+   vsnprintf(s, sizeof(b) - (s - b), format, args);
+   va_end(args);
+-  // syslog(LOG_ERR, "%s", b);
+-  fprintf(stderr, "%s\n", b);
++  write_receiver_log(LOG_ERR, format, b);
+   pthread_setcancelstate(oldState, NULL);
+   if (local_exit_requester != NULL) {
+     local_exit_requester(EXIT_FAILURE);
+@@ -153,7 +183,8 @@
+     // wait for the exit request to be honoured
+     usleep(1000000);
+     // if not, head for the hills
+-    fprintf(stderr, "fatal error: exit cleanup could not be completed.\n");
++    write_receiver_log(LOG_ERR, "fatal error: exit cleanup could not be completed.",
++                       "fatal error: exit cleanup could not be completed.");
+     _Exit(EXIT_FAILURE);
+   }
+ }
+@@ -182,8 +213,7 @@
+   va_start(args, format);
+   vsnprintf(s, sizeof(b) - (s - b), format, args);
+   va_end(args);
+-  // syslog(LOG_WARNING, "%s", b);
+-  fprintf(stderr, "%s\n", b);
++  write_receiver_log(LOG_WARNING, format, b);
+   pthread_setcancelstate(oldState, NULL);
+ }
+ 
+@@ -207,8 +237,7 @@
+   va_start(args, format);
+   vsnprintf(s, sizeof(b) - (s - b), format, args);
+   va_end(args);
+-  // syslog(LOG_DEBUG, "%s", b);
+-  fprintf(stderr, "%s\n", b);
++  write_receiver_log(LOG_DEBUG, format, b);
+   pthread_setcancelstate(oldState, NULL);
+ }
+ 
+@@ -235,8 +264,7 @@
+   va_start(args, format);
+   vsnprintf(s, sizeof(b) - (s - b), format, args);
+   va_end(args);
+-  // syslog(LOG_INFO, "%s", b);
+-  fprintf(stderr, "%s\n", b);
++  write_receiver_log(LOG_INFO, format, b);
+   pthread_setcancelstate(oldState, NULL);
+ }
